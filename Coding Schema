@@ -1,0 +1,86 @@
+# Coding Scheme for Converting German Annual Reports (PDF) into LLM-Optimized Markdown  
+**Ground Truth — October 2025**  
+HiWi Project
+
+## Inhalt
+1. [Einführung](#1-einführung)  
+   1. [Zweck und Anwendungsbereich](#11-zweck-und-anwendungsbereich)  
+2. [Kern-Elemente des Schemas](#2-kern-elemente-des-schemas)  
+   1. [Dokument-Metadaten (YAML-Header)](#21-dokument-metadaten-yaml-header)  
+   2. [Abschnittstypen im Geschäftsbericht](#22-abschnittstypen-im-geschäftsbericht)  
+   3. [Page Marking System](#23-page-marking-system)  
+3. [Überschriften-Hierarchie](#3-überschriften-hierarchie)  
+   1. [Levels und Zweck](#31-levels-und-zweck)  
+   2. [Entscheidungs-Guide](#32-entscheidungs-guide)  
+   3. [Beispielstruktur](#33-beispielstruktur)  
+4. [Zahlen- und Einheiten-Standardisierung](#4-zahlen--und-einheiten-standardisierung)  
+   1. [Formatregeln](#41-formatregeln)  
+   2. [Standard-Unit-Tags](#42-standard-unit-tags)  
+5. [Fußnotensystem](#5-fußnotensystem)  
+   1. [Strukturierte Fußnoten](#51-strukturierte-fußnoten)  
+   2. [Footnote Types](#52-footnote-types)  
+6. [Tabellenformat](#6-tabellenformat)  
+   1. [Kerngrammatik für Tabellen in Markdown](#61-kerngrammatik-für-tabellen-in-markdown)  
+   2. [Mehrzeilige Tabellenköpfe / Merged Header](#62-mehrzeilige-tabellenköpfe--merged-header)  
+7. [Seitenumbrüche im Fließtext](#7-seitenumbrüche-im-fließtext)  
+8. [Vollständiges Beispiel (Template)](#8-vollständiges-beispiel-template)  
+9. [Checkliste für Annotator:innen](#9-checkliste-für-annotatorinnen)  
+
+---
+
+## 1. Einführung
+
+Dieses Manual definiert ein einheitliches Kodierschema, um deutsche Geschäftsberichte (PDF) nach einem festen Muster in Markdown zu übertragen.
+
+Ziel:
+- aus PDF → sauberes, maschinenlesbares Markdown,
+- mit stabiler Seitenausrichtung,
+- mit klarer Struktur,
+- mit normalisierten Zahlen und Einheiten.
+
+Der Output dient als Ground Truth für LLM-Training. Das Modell soll später:
+- Key Audit Matters aus Prüfungsberichten identifizieren,
+- finanzielle Fragen mit Seitenangabe beantworten,
+- den Aufbau deutscher Geschäftsberichte verstehen,
+- Zahlen richtig und mit Einheit zitieren.
+
+**Wichtig:**  
+Wir optimieren für **Maschinen-Lesbarkeit**, nicht für optisches Layout.
+
+### 1.1 Zweck und Anwendungsbereich
+
+Das Schema wird verwendet, um:
+- Prüfungsurteile / Bestätigungsvermerke maschinenlesbar zu machen,
+- Kennzahlen konsistent zu taggen,
+- Seitenbezüge aus dem PDF explizit abzubilden,
+- Tabellen gleichförmig darzustellen.
+
+Es deckt insbesondere ab:
+- Lagebericht  
+- Konzernabschluss  
+- Anhang / Notes  
+- Bestätigungsvermerk  
+- Nachhaltigkeitsbericht (CSRD / ESRS)  
+- Corporate Governance  
+- Kalender / Impressum  
+- und typische Standard-Tabellen daraus.
+
+---
+
+## 2. Kern-Elemente des Schemas
+
+### 2.1 Dokument-Metadaten (YAML-Header)
+
+Jede annotierte Markdown-Datei beginnt mit einem YAML-Block.  
+Er beschreibt **nur den Ausschnitt**, nicht den kompletten Geschäftsbericht.
+
+```yaml
+---
+document_meta:
+  company: "BMW AG"
+  year: 2024
+  document_type: "annual_report"
+  language: "de"
+  pages_covered: [89, 90, 91]
+  sections: ["audit_opinion", "key_audit_matters", "footnotes"]
+---
