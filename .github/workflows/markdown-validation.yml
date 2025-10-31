@@ -1,0 +1,338 @@
+name: Validate Markdown (Schema + PDF check)
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- Markdownlint: Syntax / GFM-Style ---
+      - name: Run markdownlint
+        uses: avto-dev/markdown-lint@v1
+        with:
+          config: '.markdownlint.json'
+          args: 'reports/**/*.md'
+
+      # --- Python-Validator & PDF-Abgleich ---
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate Coding Schema (YAML, PAGE, Tables, Units, Footnotes)
+        run: |
+          python scripts/validate_schema.py
+
+      - name: Compare Markdown vs PDF (numbers/keywords on covered pages)
+        run: |
+          python scripts/compare_pdf_markdown.py
+
+{
+  "default": true,
+  "MD013": false,
+  "MD041": false,
+  "MD033": { "allowed_elements": [] },
+  "MD036": false,
+  "MD024": { "allow_different_nesting": true },
+  "MD025": false,
+  "MD046": "fenced",
+  "MD004": "dash",
+  "MD007": { "indent": 2 }
+}
+
+
+PyYAML==6.0.2
+pdfminer.six==20231228
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import re, sys, yaml
+from pathlib import Path
+
+MD_DIR = Path("reports")
+
+ALLOWED_DOC_TYPES = {"annual_report", "sustainability_report", "audit_report"}
+ALLOWED_LANGS = {"de", "en"}
+ALLOWED_SECTIONS = {
+    "management_report","consolidated_financial_statements","notes","audit_opinion",
+    "sustainability","corporate_governance","financial_calendar","imprint",
+    "consolidated_balance_sheet","income_statement","cash_flow_statement",
+    "statement_of_changes_in_equity","accounting_policies","segment_reporting",
+    "business_development","financial_position","risk_and_opportunity_report","outlook",
+    "research_and_development","employees","subsequent_events","key_audit_matters","footnotes"
+}
+UNIT_TAGS = {
+    "MIO","MRD","TEUR","EUR","PERCENT","COUNT","DAYS","YEARS","SHARES",
+    "BOE","KBOE","USD_MIO","GBP_MIO","SQM","USD","PLN","TON","EUR_PER_SHARE","EMPLOYEES"
+}
+
+FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*", re.DOTALL)
+PAGE_TAG_RE     = re.compile(r"\[PAGE:(\d+)\]")
+SECTION_TAG_RE  = re.compile(r"\[SECTION:([A-Z0-9_]+)\|PAGES:([0-9,\-\s]+)\]")
+UNIT_TAG_ANY_RE = re.compile(r"\[([A-Z_]+)\]")
+NBSP_RE         = re.compile(u"\u00A0")
+BAD_DASH_RE     = re.compile(u"[\u2013\u2014]")
+PIPE_LINE_RE    = re.compile(r"^\|.*\|$")
+SEP_LINE_RE     = re.compile(r"^\|\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)*\s*\|$")
+
+def md_files():
+    return sorted(str(p) for p in MD_DIR.rglob("*.md"))
+
+def fail(file, errors):
+    print(f"[FAIL] {file}")
+    for e in errors: print("  -", e)
+
+def ok(file): print(f"[OK]   {file}")
+
+def parse_frontmatter(text):
+    m = FRONTMATTER_RE.match(text)
+    if not m: return None, text
+    data = yaml.safe_load(m.group(1))
+    rest = text[m.end():]
+    return data, rest
+
+def validate_frontmatter(meta, errors):
+    if meta is None:
+        return  # YAML optional
+    if "document_meta" in (meta or {}):
+        errors.append("Remove 'document_meta:' wrapper – use top-level keys.")
+    req = ["company","year","document_type","language","pages_covered","sections"]
+    missing = [k for k in req if k not in meta]
+    if missing: errors.append(f"Frontmatter present but missing keys: {missing}")
+    if "year" in meta and (not isinstance(meta["year"], int) or not (1990 <= meta["year"] <= 2100)):
+        errors.append("year must be integer in [1990,2100]")
+    if "document_type" in meta and meta["document_type"] not in ALLOWED_DOC_TYPES:
+        errors.append(f"document_type must be one of {sorted(ALLOWED_DOC_TYPES)}")
+    if "language" in meta and meta["language"] not in ALLOWED_LANGS:
+        errors.append(f"language must be one of {sorted(ALLOWED_LANGS)}")
+    if "pages_covered" in meta:
+        pc = meta["pages_covered"]
+        if not (isinstance(pc, list) and all(isinstance(i, int) for i in pc)):
+            errors.append("pages_covered must be a list of integers")
+        elif pc != sorted(pc):
+            errors.append("pages_covered should be sorted ascending")
+    if "sections" in meta:
+        secs = meta["sections"]
+        if not (isinstance(secs, list) and all(isinstance(s, str) for s in secs)):
+            errors.append("sections must be a list of strings")
+        else:
+            unknown = [s for s in secs if s not in ALLOWED_SECTIONS]
+            if unknown: errors.append(f"sections contain unknown values: {unknown}")
+
+def validate_text(text, errors):
+    m = PAGE_TAG_RE.search(text)
+    if not m:
+        errors.append("Missing [PAGE:X] tag.")
+    else:
+        if m.start() > 1000:
+            errors.append("First [PAGE:X] appears very late – expected near start.")
+    for m in SECTION_TAG_RE.finditer(text):
+        pages = m.group(2)
+        if not re.match(r"^\d+(?:\s*-\s*\d+)?(?:\s*,\s*\d+(?:\s*-\s*\d+)?)*$", pages):
+            errors.append(f"Invalid SECTION pages syntax: '{pages}'")
+    for m in UNIT_TAG_ANY_RE.finditer(text):
+        tag = m.group(1)
+        if tag == "PAGE" or tag.startswith("FOOTNOTE"): continue
+        if tag not in UNIT_TAGS:
+            errors.append(f"Unknown unit tag '[{tag}]'")
+    has_refs  = re.search(r"\[\^[0-9]+\]", text) is not None
+    has_block = re.search(r"(?m)^\s*##\s+FUSSNOTEN\s*$", text) is not None
+    if has_refs and not has_block:
+        errors.append("Footnote refs found but missing '## FUSSNOTEN' section.")
+    m = re.search(r"(?m)^\[\^[0-9]+\]:", text)
+    if m:
+        if not text[:m.start()].rstrip("\n").endswith("\n\n"):
+            errors.append("Add one blank line before first footnote definition.")
+    if NBSP_RE.search(text):   errors.append("Found NBSP (\\u00A0) – replace with normal spaces.")
+    if BAD_DASH_RE.search(text): errors.append("Found en/em dash –/— – use '-' ASCII hyphen.")
+
+def validate_tables(text, errors):
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        if PIPE_LINE_RE.match(lines[i]):
+            block = []
+            while i < len(lines) and PIPE_LINE_RE.match(lines[i]):
+                block.append(lines[i]); i += 1
+            if len(block) < 2:
+                errors.append("Table too short (need header + separator)."); continue
+            if not SEP_LINE_RE.match(block[1]):
+                errors.append("Second table line must be separator like '| --- | --- |'.")
+            def cols(s): return s.count("|") - 1
+            colcounts = [cols(s) for s in block]
+            if len(set(colcounts)) != 1:
+                errors.append(f"Table column counts differ: {colcounts}")
+        else:
+            i += 1
+
+def main():
+    files = md_files()
+    if not files:
+        print("No markdown files found."); sys.exit(1)
+    had_errors = False
+    for fp in files:
+        txt = Path(fp).read_text(encoding="utf-8", errors="replace")
+        errors = []
+        meta, rest = parse_frontmatter(txt)
+        try:    validate_frontmatter(meta, errors)
+        except Exception as e: errors.append(f"YAML parse/validate error: {e}")
+        validate_text(rest, errors)
+        validate_tables(rest, errors)
+        if errors: had_errors = True; fail(fp, errors)
+        else:      ok(fp)
+    sys.exit(1 if had_errors else 0)
+
+if __name__ == "__main__":
+    main()
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import re, sys, yaml
+from pathlib import Path
+from pdfminer.high_level import extract_text
+
+MD_DIR  = Path("reports")
+PDF_DIR = Path("pdfs")
+
+FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*", re.DOTALL)
+TABLE_ROW = re.compile(r"^\|.*\|$")
+SEP_LINE  = re.compile(r"^\|\s*:?-{3,}:?(?:\s*\|\s*:?-{3,}:?)*\s*\|$")
+NUMBER_MD = re.compile(r"\(?-?\d+(?:\.\d+)?\)?")
+PAGES_FROM_NAME_RE = re.compile(r"_S(\d+)(?:-S?(\d+))?(?=\.md$)", re.IGNORECASE)
+
+def md_files():
+    return sorted(str(p) for p in MD_DIR.rglob("*.md"))
+
+def pdf_for(md_path: str) -> Path:
+    name = Path(md_path).name
+    return PDF_DIR / Path(name).with_suffix(".pdf").name
+
+def load_frontmatter(text):
+    m = FRONTMATTER_RE.match(text)
+    if not m: return None, text
+    data = yaml.safe_load(m.group(1))
+    return data, text[m.end():]
+
+def pages_from_filename(md_path: str):
+    m = PAGES_FROM_NAME_RE.search(Path(md_path).name)
+    if not m: return []
+    a = int(m.group(1)); b = m.group(2)
+    if b:
+        b = int(b)
+        if b >= a: return list(range(a, b+1))
+    return [a]
+
+def normalize_number_for_match(s: str):
+    s = s.strip()
+    neg = s.startswith("(") and s.endswith(")")
+    if neg: s = s[1:-1]
+    s = s.replace(" ", "")
+    out = set()
+    if re.match(r"^-?\d+(\.\d+)?$", s):
+        if neg and not s.startswith("-"): s = "-" + s
+        out.add(s)
+        out.add(s.replace(".", ","))  # deutsch
+        out.add(s.replace(".", ""))   # ohne Dezimalpunkt
+    return out or {s}
+
+def extract_tables(markdown_text):
+    lines = markdown_text.splitlines()
+    i, tables = 0, []
+    while i < len(lines):
+        if TABLE_ROW.match(lines[i]):
+            block = []
+            while i < len(lines) and TABLE_ROW.match(lines[i]):
+                block.append(lines[i]); i += 1
+            if len(block) >= 2 and SEP_LINE.match(block[1]):
+                header = [c.strip() for c in block[0].strip("|").split("|")]
+                data   = [[c.strip() for c in r.strip("|").split("|")] for r in block[2:]]
+                tables.append({"header": header, "rows": data})
+        else:
+            i += 1
+    return tables
+
+def get_pdf_text(pdf_path: Path, pages: list[int]) -> str:
+    if not pages: return extract_text(str(pdf_path))
+    zero_based = [p-1 for p in pages if isinstance(p, int) and p > 0]
+    return extract_text(str(pdf_path), page_numbers=zero_based)
+
+def contains_any(haystack: str, needles: set[str]) -> bool:
+    for n in needles:
+        if n and n in haystack: return True
+    return False
+
+def main():
+    files = md_files()
+    if not files:
+        print("No markdown files found."); sys.exit(0)
+
+    had_flags = False
+    for fp in files:
+        md_text = Path(fp).read_text(encoding="utf-8", errors="replace")
+        meta, body = load_frontmatter(md_text)
+
+        pdf_path = pdf_for(fp)
+        if not pdf_path.exists():
+            print(f"[WARN] {fp} – PDF not found: {pdf_path}")
+            continue
+
+        pages = []
+        if isinstance(meta, dict) and isinstance(meta.get("pages_covered"), list):
+            pages = [int(p) for p in meta["pages_covered"] if isinstance(p, int)]
+        if not pages:
+            pages = pages_from_filename(fp)
+
+        try:
+            pdf_txt = get_pdf_text(pdf_path, pages)
+        except Exception as e:
+            print(f"[WARN] {fp} – PDF read error: {e}")
+            continue
+
+        flags = []
+        for t in extract_tables(body):
+            for row in t["rows"]:
+                if not row: continue
+                label = row[0]
+                if len(label) >= 4 and label not in pdf_txt:
+                    flags.append(f"Label not found in PDF text: '{label}'")
+                for cell in row[1:]:
+                    nums = set(NUMBER_MD.findall(cell))
+                    cand = set()
+                    for n in nums: cand |= normalize_number_for_match(n)
+                    if nums and not contains_any(pdf_txt, cand):
+                        flags.append(f"Number likely not found in PDF: {cell}")
+
+        m = re.search(r"\[PAGE:(\d+)\]", body)
+        if pages and m and int(m.group(1)) not in pages:
+            flags.append(f"First [PAGE:{m.group(1)}] not in pages_covered {pages} (check!)")
+
+        if flags:
+            had_flags = True
+            print(f"[FLAG] {fp}")
+            for f in flags[:60]: print("  -", f)
+            if len(flags) > 60: print(f"  - ... {len(flags)-60} more")
+        else:
+            print(f"[OK]   {fp}")
+
+    # Flags blockieren NICHT:
+    sys.exit(0)
+
+if __name__ == "__main__":
+    main()
